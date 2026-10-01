@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Fazenda 3D</title>
+<style>
+  html,body{margin:0;height:100%;overflow:hidden;background:#cfe6ec;font-family:system-ui,sans-serif;user-select:none}
+  #game{position:fixed;inset:0;width:100%;height:100%;display:block;touch-action:none}
+  .coins{position:fixed;top:max(14px,env(safe-area-inset-top));left:14px;padding:8px 14px;border-radius:999px;
+    background:rgba(255,250,240,.85);font-weight:700;font-size:18px;color:#5a4636;box-shadow:0 2px 8px #0002}
+  .bar{position:fixed;left:50%;transform:translateX(-50%);bottom:max(14px,env(safe-area-inset-bottom));display:flex;gap:8px;
+    padding:8px;border-radius:16px;background:rgba(255,250,240,.85);box-shadow:0 2px 10px #0003}
+  .bar button,.inv button{border:2px solid transparent;background:#fff;border-radius:10px;padding:8px 12px;font-size:14px;
+    color:#5a4636;cursor:pointer;font-weight:600}
+  .bar button small{opacity:.7;margin-left:4px}
+  .bar button.on{border-color:#e0a13a;background:#fff3d6}
+  .inv{position:fixed;right:14px;bottom:calc(max(14px,env(safe-area-inset-bottom)) + 62px);width:230px;padding:12px;border-radius:14px;
+    background:rgba(255,250,240,.92);box-shadow:0 2px 10px #0003;color:#5a4636}
+  .inv[hidden]{display:none}
+  .inv .row{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:6px 0}
+  .inv .row button{padding:4px 10px}
+  .inv .all{width:100%;margin-top:6px;background:#e0a13a;color:#fff}
+  .toast{position:fixed;top:max(14px,env(safe-area-inset-top));left:50%;transform:translateX(-50%);padding:6px 14px;border-radius:999px;
+    background:rgba(60,45,35,.8);color:#fff;font-size:14px;opacity:0;transition:opacity .25s;pointer-events:none}
+  .toast.show{opacity:1}
+  .bar{flex-wrap:wrap;justify-content:center;max-width:calc(100vw - 24px);box-sizing:border-box}
+  .bar button:disabled,.inv button:disabled{opacity:.45;cursor:default}
+  .inv .tstat{font-size:13px;margin:8px 0 4px;opacity:.85}
+  .truckpill{position:fixed;top:max(58px,calc(env(safe-area-inset-top) + 44px));left:14px;padding:5px 12px;border-radius:999px;
+    background:rgba(255,250,240,.85);font-weight:600;font-size:14px;color:#5a4636;box-shadow:0 2px 8px #0002}
+  .truckpill[hidden]{display:none}
+  .inv button.on{border-color:#e0a13a;background:#fff3d6}
+  .inv{max-height:70vh;overflow-y:auto}
+  .mgroup{font-weight:700;font-size:13px;margin:10px 0 4px;opacity:.8}
+  .mgroup:first-child{margin-top:0}
+  .balloons{position:fixed;inset:0;pointer-events:none;z-index:1;overflow:hidden}
+  .balloon{position:absolute;left:0;top:0;will-change:transform}
+  .balloon span{display:block;position:relative;padding:4px 9px;border-radius:14px;background:#fff;font-size:20px;line-height:1.1;
+    box-shadow:0 3px 8px #0003;animation:bob 1.1s ease-in-out infinite}
+  .balloon span::after{content:"";position:absolute;left:50%;bottom:-6px;margin-left:-6px;border:6px solid transparent;border-top-color:#fff;border-bottom:0}
+  @keyframes bob{50%{transform:translateY(-6px)}}
+  .coins small{font-size:12px;opacity:.7;font-weight:600;margin-left:4px}
+  .clock{position:fixed;top:max(14px,env(safe-area-inset-top));right:14px;padding:6px 12px;border-radius:999px;
+    background:rgba(20,20,30,.55);color:#fff;font-weight:700;font-size:14px;box-shadow:0 2px 8px #0003}
+  .letter{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);width:260px;padding:18px;border-radius:10px;
+    background:#fbf3df;color:#4a3a28;box-shadow:0 10px 30px #0005;border:1px solid #e4d3ab;z-index:5}
+  .letter[hidden]{display:none}
+  .letter h3{margin:0 0 8px;font-size:16px}
+  .letter p{margin:6px 0;font-size:14px;line-height:1.35}
+  .letter .close{position:absolute;top:8px;right:10px;background:none;border:none;font-size:16px;color:#8a7250;padding:2px 6px}
+  .letter .all{width:100%;margin-top:8px;background:#c8483c;color:#fff;font-weight:700}
+  .letter .all:disabled{opacity:.5}
+  .pasturebar{position:fixed;top:max(58px,calc(env(safe-area-inset-top) + 44px));left:50%;transform:translateX(-50%);
+    display:flex;align-items:center;gap:10px;padding:8px 14px;border-radius:999px;background:rgba(255,250,240,.92);
+    box-shadow:0 2px 10px #0003;font-size:14px;color:#5a4636;z-index:4}
+  .pasturebar[hidden]{display:none}
+  .pasturebar button{border:none;border-radius:8px;padding:5px 10px;font-weight:700;background:#8fcf6a;color:#2c3a20}
+  .pasturebar button#cancelPasture{background:#e2e2e2;color:#555}
+  .market{width:270px}
+  .mtabs{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:8px;padding-bottom:8px;border-bottom:1px solid #e8dfcf}
+  .mtabs button{flex:1 1 auto;padding:6px 4px;font-size:12px;border-radius:8px;background:#fff;color:#5a4636;border:2px solid transparent}
+  .mtabs button.on{border-color:#e0a13a;background:#fff3d6}
+  .mpane .mgroup:first-child{margin-top:0}
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div id="hud"></div>
+<script type="module" src="/src/main.ts"></script>
+</body>
+</html>
