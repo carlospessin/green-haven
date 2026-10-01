@@ -5,8 +5,8 @@
             "root": ".",
             "framework": "vite"
         },
-        "fazenda-3d": {
-            "root": "fazenda-3d",
+        "green-haven": {
+            "root": "green-haven",
             "framework": "vite"
         }
     },
