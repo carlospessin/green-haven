@@ -16,18 +16,26 @@ async function boot() {
   window.addEventListener('resize', () => app.resizeCanvas());
 
   const game = new Game();
-  const scene = new FarmScene(app, game.farm);
+  const scene = new FarmScene(app, game);
   const cam = new IsometricCamera(app, canvas);
   const hud = new HUD(game);
-  const balloons = new Balloons(cam, scene, game.farm);
+  const balloons = new Balloons(cam, scene, game);
   new FarmInput(canvas, cam, scene, game);
   game.onEvent(e => scene.handleEvent(e));
 
-  let acc = 0;
+  let acc = 0, lastZone = 0, lastOwned = game.zones.map(z => z.owned);
   scene.setActiveTool(game.selectedTool?.kind ?? null);
   scene.sync(Date.now());
   app.on('update', (dt: number) => {
     const now = Date.now();
+    if (game.activeZone !== lastZone) {
+      lastZone = game.activeZone;
+      const z = game.zones[lastZone];
+      scene.setActiveZone(lastZone);
+      cam.panTo(z.dx, z.dz);
+    }
+    game.zones.forEach((z, i) => { if (z.owned && !lastOwned[i]) { lastOwned[i] = true; scene.revealZone(i); } });
+    cam.update();
     scene.setActiveTool(game.selectedTool?.kind ?? null);
     scene.update(dt);
     scene.applyDayNight(now); cam.setSky(scene.skyColor);

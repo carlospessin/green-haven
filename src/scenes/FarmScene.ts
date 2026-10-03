@@ -1,11 +1,12 @@
 import * as pc from 'playcanvas';
 import { CropType } from '../data/crops';
 import { CropStage } from '../game/Crop';
-import { Farm, FenceDir } from '../game/Farm';
+import { FenceDir } from '../game/Farm';
 import { FarmTile } from '../game/FarmTile';
-import type { GameEvent } from '../game/Game';
+import type { Game, GameEvent } from '../game/Game';
 import { FLIGHT_MS, LOAD_MS, TRIP_MS, TruckSystem, staggerMs } from '../game/TruckSystem';
 import { SILO_TIERS, TRUCK_TIERS } from '../data/upgrades';
+import { BIOMES } from '../data/biomes';
 import { ghostMat, group, lerpColor, mat, prim } from './build';
 import { dayNightPhase } from '../game/DayNight';
 
@@ -41,7 +42,7 @@ export function createCropModel(type: CropType, stage: CropStage): pc.Entity {
   return root;
 }
 
-/** Árvore ou pedra bloqueando um tile recém-liberado; some ao ser limpa com machado/picareta. */
+/** Árvore, pedra ou água bloqueando um tile; some ao ser limpa com machado/picareta (água é permanente). */
 function createObstacleModel(kind: 'tree' | 'rock' | 'water'): pc.Entity {
   const root = new pc.Entity(`obstacle-${kind}`);
   if (kind === 'tree') {
@@ -57,13 +58,19 @@ function createObstacleModel(kind: 'tree' | 'rock' | 'water'): pc.Entity {
   return root;
 }
 
+interface ZoneView { key: string; entity: pc.Entity }
+
 export class FarmScene {
   readonly root = new pc.Entity('farm');
-  private views = new Map<FarmTile, { key: string; entity: pc.Entity }>();
+  private zoneGroups: pc.Entity[] = [];
+  private zoneFenceGroups: pc.Entity[] = [];
+  private zoneViews: Map<FarmTile, ZoneView>[] = [];
+  private zoneFenceKey: string[] = [];
+  private zoneCloud: (pc.Entity | null)[] = [];
+  private zoneMarker: (pc.Entity | null)[] = [];
+  private activeZoneIndex = 0;
   private hover!: pc.Entity;
   private hoverEdge!: pc.Entity;
-  private fenceGroup!: pc.Entity;
-  private lastFenceKey = '';
   private activeToolKind: string | null = null;
   private blades!: pc.Entity;
   private animals: { e: pc.Entity; bx: number; bz: number; ph: number; sp: number; r: number }[] = [];
@@ -91,21 +98,55 @@ export class FarmScene {
   private cargo!: pc.Entity;
   private cargoKey = '';
 
-  constructor(private app: pc.Application, private farm: Farm) {
+  constructor(private app: pc.Application, private game: Game) {
     app.root.addChild(this.root);
-    this.buildLight(); this.buildTerrain(); this.buildBuildings(); this.buildNature(); this.buildTruck(); this.buildMailbox(); this.buildCoopBase(); this.buildHover();
-    this.fenceGroup = group(this.root, 0, 0, 0, 'fences');
-    this.syncFences();
+    this.buildLight();
+    this.buildSharedTable();
+    for (let i = 0; i < game.zones.length; i++) this.buildZone(i);
+    this.buildHover();
+    for (let i = 0; i < game.zones.length; i++) this.syncFencesFor(i);
   }
 
-  // --- coordenadas lógica <-> mundo ---
+  private buildZone(i: number) {
+    const z = this.game.zones[i];
+    const grp = group(this.root, z.dx, 0, z.dz, `zone${i}`);
+    this.zoneGroups[i] = grp;
+    this.zoneViews[i] = new Map();
+    this.zoneFenceGroups[i] = group(grp, 0, 0, 0, 'fences');
+    this.zoneFenceKey[i] = '';
+    this.buildIsland(grp, BIOMES[z.biome].ground);
+    if (i === 0) {
+      this.buildBuildings(grp); this.buildNature(grp); this.buildTruck(grp); this.buildMailbox(grp); this.buildCoopBase(grp);
+    } else {
+      this.zoneCloud[i] = z.owned ? null : this.buildCloudCover(grp);
+      this.zoneMarker[i] = this.buildMarker(grp);
+    }
+  }
+
+  /** Revela um terreno comprado: some com a nuvem que cobria o interior. */
+  revealZone(i: number) {
+    const c = this.zoneCloud[i]; if (c) { c.destroy(); this.zoneCloud[i] = null; }
+  }
+
+  /** Troca qual terreno recebe cliques de ferramenta (plantar/arar/cercar); também reancora os marcadores de hover nele. */
+  setActiveZone(i: number) {
+    if (i === this.activeZoneIndex) return;
+    this.activeZoneIndex = i;
+    const grp = this.zoneGroups[i];
+    grp.addChild(this.hover); grp.addChild(this.hoverEdge); grp.addChild(this.pastureSelBox);
+    this.hover.enabled = false; this.hoverEdge.enabled = false; this.pastureSelBox.enabled = false;
+  }
+
+  // --- coordenadas lógica (local à zona) <-> mundo ---
   cellToWorld(ix: number, iz: number) {
-    const n = this.farm.size;
+    const n = 9;
     return new pc.Vec3(PLOT_X + (ix - (n - 1) / 2) * CELL, 0, PLOT_Z + (iz - (n - 1) / 2) * CELL);
   }
+  /** Picking sempre na zona ativa: converte mundo -> local subtraindo o deslocamento dessa zona. */
   cellFromWorld(x: number, z: number): [number, number] | null {
-    const n = this.farm.size;
-    const ix = Math.floor((x - PLOT_X) / CELL + n / 2), iz = Math.floor((z - PLOT_Z) / CELL + n / 2);
+    const zo = this.game.zones[this.activeZoneIndex], n = 9;
+    const lx = x - zo.dx, lz = z - zo.dz;
+    const ix = Math.floor((lx - PLOT_X) / CELL + n / 2), iz = Math.floor((lz - PLOT_Z) / CELL + n / 2);
     return ix < 0 || iz < 0 || ix >= n || iz >= n ? null : [ix, iz];
   }
   setHover(c: [number, number] | null) {
@@ -123,72 +164,84 @@ export class FarmScene {
     return dir === 'n' ? new pc.Vec3(c.x, 0, c.z - o) : dir === 's' ? new pc.Vec3(c.x, 0, c.z + o)
       : dir === 'e' ? new pc.Vec3(c.x + o, 0, c.z) : new pc.Vec3(c.x - o, 0, c.z);
   }
-  /** Encontra a borda de célula mais próxima de um ponto do mundo (para colocar/demolir cerca). */
+  /** Encontra a borda de célula mais próxima de um ponto do mundo, na zona ativa. */
   edgeFromWorld(x: number, z: number): [number, number, FenceDir] | null {
-    const n = this.farm.size;
-    const fx = (x - PLOT_X) / CELL + n / 2, fz = (z - PLOT_Z) / CELL + n / 2;
+    const zo = this.game.zones[this.activeZoneIndex], n = 9;
+    const lx = x - zo.dx, lz = z - zo.dz;
+    const fx = (lx - PLOT_X) / CELL + n / 2, fz = (lz - PLOT_Z) / CELL + n / 2;
     const ix = Math.floor(fx), iz = Math.floor(fz);
     if (ix < 0 || iz < 0 || ix >= n || iz >= n) return null;
-    const lx = fx - ix - 0.5, lz = fz - iz - 0.5;
-    if (Math.max(Math.abs(lx), Math.abs(lz)) < 0.28) return null; // clique muito no centro da célula
-    const dir: FenceDir = Math.abs(lx) > Math.abs(lz) ? (lx > 0 ? 'e' : 'w') : (lz > 0 ? 's' : 'n');
+    const flx = fx - ix - 0.5, flz = fz - iz - 0.5;
+    if (Math.max(Math.abs(flx), Math.abs(flz)) < 0.28) return null; // clique muito no centro da célula
+    const dir: FenceDir = Math.abs(flx) > Math.abs(flz) ? (flx > 0 ? 'e' : 'w') : (flz > 0 ? 's' : 'n');
     return [ix, iz, dir];
   }
 
-  /** Reconstrói as cercas: todas as colocadas (bordas do terreno OU perímetro de pasto) + "fantasmas" nas bordas livres do terreno quando a ferramenta cerca está ativa. */
-  syncFences() {
-    const key = `${this.farm.fenceVersion}|${this.activeToolKind === 'fence'}`;
-    if (key === this.lastFenceKey) return;
-    this.lastFenceKey = key;
-    this.fenceGroup.children.slice().forEach(c => (c as pc.Entity).destroy());
+  zoneMarkerWorldPos(i: number): pc.Vec3 | null { return this.zoneMarker[i]?.getPosition() ?? null; }
+
+  /** Reconstrói as cercas de uma zona: colocadas (bordas do terreno ou perímetro de pasto) + "fantasmas" só na zona ativa com a ferramenta cerca ligada. */
+  private syncFencesFor(i: number) {
+    const z = this.game.zones[i];
+    const key = `${z.farm.fenceVersion}|${i === this.activeZoneIndex && this.activeToolKind === 'fence'}`;
+    if (key === this.zoneFenceKey[i]) return;
+    this.zoneFenceKey[i] = key;
+    const fg = this.zoneFenceGroups[i];
+    fg.children.slice().forEach(c => (c as pc.Entity).destroy());
     const dirs: FenceDir[] = ['n', 's', 'e', 'w'];
     const drawFence = (ix: number, iz: number, dir: FenceDir) => {
       const p = this.edgeWorld(ix, iz, dir), yaw = dir === 'n' || dir === 's' ? 0 : 90;
-      prim(this.fenceGroup, 'box', WOOD, [p.x, 0.28, p.z], [0.1, 0.56, 0.1], [0, yaw, 0]);
-      for (const y of [0.2, 0.4]) prim(this.fenceGroup, 'box', WOOD2, [p.x, y, p.z], [0.05, 0.05, CELL * 0.95], [0, yaw, 0]);
+      prim(fg, 'box', WOOD, [p.x, 0.28, p.z], [0.1, 0.56, 0.1], [0, yaw, 0]);
+      for (const y of [0.2, 0.4]) prim(fg, 'box', WOOD2, [p.x, y, p.z], [0.05, 0.05, CELL * 0.95], [0, yaw, 0]);
     };
-    for (const fk of this.farm.fences) {
+    for (const fk of z.farm.fences) {
       const [ix, iz, dir] = fk.split(',') as [string, string, FenceDir];
       drawFence(+ix, +iz, dir);
     }
-    if (this.activeToolKind === 'fence') {
-      for (const t of this.farm.tiles) for (const dir of dirs) {
-        if (!this.farm.isBoundary(t.ix, t.iz, dir) || this.farm.hasFence(t.ix, t.iz, dir)) continue;
+    if (i === this.activeZoneIndex && this.activeToolKind === 'fence') {
+      for (const t of z.farm.tiles) for (const dir of dirs) {
+        if (!z.farm.isBoundary(t.ix, t.iz, dir) || z.farm.hasFence(t.ix, t.iz, dir)) continue;
         const p = this.edgeWorld(t.ix, t.iz, dir), yaw = dir === 'n' || dir === 's' ? 0 : 90;
-        const g = prim(this.fenceGroup, 'box', '#ffe27a', [p.x, 0.32, p.z], [0.06, 0.5, CELL * 0.8], [0, yaw, 0]);
+        const g = prim(fg, 'box', '#ffe27a', [p.x, 0.32, p.z], [0.06, 0.5, CELL * 0.8], [0, yaw, 0]);
         g.render!.material = ghostMat();
       }
     }
   }
 
-  /** Reconstrói só as células cujo estado visual mudou. Ponto de troca p/ instancing depois. */
+  /** Reconstrói só as células cujo estado visual mudou, em todas as zonas. Terrenos ainda não comprados só mostram a borda. */
   sync(now: number) {
-    for (const t of this.farm.tiles) {
-      const unlocked = this.farm.unlocked(t.ix, t.iz);
+    for (let i = 0; i < this.game.zones.length; i++) this.syncZoneTiles(i, now);
+  }
+  private syncZoneTiles(i: number, now: number) {
+    const z = this.game.zones[i], views = this.zoneViews[i], grp = this.zoneGroups[i];
+    const borderOnly = i > 0 && !z.owned;
+    for (const t of z.farm.tiles) {
+      if (borderOnly && t.ix !== 0 && t.ix !== 8 && t.iz !== 0 && t.iz !== 8) {
+        const v = views.get(t); if (v) { v.entity.destroy(); views.delete(t); }
+        continue;
+      }
       const st = t.stage(now);
-      const key = `${unlocked ? 1 : 0}|${t.obstacle ?? ''}|${t.pasture ? 1 : 0}|${t.tilled ? 1 : 0}|${t.crop ?? ''}|${st ?? ''}`;
-      const v = this.views.get(t);
+      const key = `${t.obstacle ?? ''}|${t.pasture ? 1 : 0}|${t.tilled ? 1 : 0}|${t.crop ?? ''}|${st ?? ''}`;
+      const v = views.get(t);
       if (v && v.key === key) continue;
       v?.entity.destroy();
       const e = new pc.Entity('tile');
       e.setPosition(this.cellToWorld(t.ix, t.iz));
-      if (!unlocked) prim(e, 'sphere', '#6a8f4a', [(t.ix % 2) * 0.2 - 0.1, 0.06, (t.iz % 2) * 0.2 - 0.1], [0.16, 0.1, 0.16]); // mato: terreno ainda não liberado
-      else if (t.pasture) prim(e, 'box', '#8fcf6a', [0, 0.025, 0], [CELL * 0.96, 0.05, CELL * 0.96]); // pasto: gramado claro cercado
-      else if (t.obstacle) e.addChild(createObstacleModel(t.obstacle)); // área liberada mas com árvore/pedra/água
+      if (t.pasture) prim(e, 'box', '#8fcf6a', [0, 0.025, 0], [CELL * 0.96, 0.05, CELL * 0.96]); // pasto: gramado claro cercado
+      else if (t.obstacle) e.addChild(createObstacleModel(t.obstacle)); // árvore/pedra/água
       else {
         if (t.tilled || t.crop) prim(e, 'box', '#5e412b', [0, 0.075, 0], [CELL * 0.92, 0.05, CELL * 0.92]);
         if (t.crop && st) e.addChild(createCropModel(t.crop, st));
       }
-      this.root.addChild(e);
-      this.views.set(t, { key, entity: e });
+      grp.addChild(e);
+      views.set(t, { key, entity: e });
     }
-    this.syncFences();
+    this.syncFencesFor(i);
   }
 
   update(dt: number) {
     this.t += dt;
     this.blades.rotate(0, 0, -dt * 50);
-    for (let i = this.fx.length - 1; i >= 0; i--) { // itens em voo (colheita -> silo, silo -> caminhão)
+    for (let i = this.fx.length - 1; i >= 0; i--) { // itens em voo (colheita -> silo, silo -> caminhão, ou "poof" local)
       const f = this.fx[i], u = (this.t - f.t0) / f.dur;
       if (u < 0) continue;
       if (u >= 1) { f.e.destroy(); f.onLand?.(); this.fx.splice(i, 1); continue; }
@@ -211,7 +264,6 @@ export class FarmScene {
     this.sun.addComponent('light', { type: 'directional', color: new pc.Color(1, 0.92, 0.78), intensity: 1.8, shadowType: pc.SHADOW_PCF5_32F, shadowResolution: 4096, ...shadowOpts });
     this.moon = new pc.Entity('moon');
     this.moon.addComponent('light', { type: 'directional', color: new pc.Color(0.55, 0.62, 0.85), intensity: 0.3, shadowType: pc.SHADOW_PCF3_32F, shadowResolution: 2048, ...shadowOpts });
-    this.moon.enabled = false;
     const fill = new pc.Entity('fill');
     fill.addComponent('light', { type: 'directional', color: new pc.Color(0.7, 0.8, 1), intensity: 0.2, castShadows: false });
     fill.setEulerAngles(35, 200, 0);
@@ -229,64 +281,90 @@ export class FarmScene {
     e.setLocalScale(2, 2, 2);
     return e;
   }
-  private buildMailbox() {
-    this.mailbox = group(this.root, 9.5, 0, -6.1, 'mailbox'); // ao lado do silo (SILO_X=8, SILO_Z=-6.6)
+  private buildMailbox(r: pc.Entity) {
+    this.mailbox = group(r, 9.5, 0, -6.1, 'mailbox'); // ao lado do silo (SILO_X=8, SILO_Z=-6.6)
     prim(this.mailbox, 'cylinder', '#8b6a45', [0, 0.35, 0], [0.07, 0.7, 0.07]);
     prim(this.mailbox, 'box', '#c8483c', [0, 0.78, 0], [0.32, 0.24, 0.5]);
     prim(this.mailbox, 'box', '#f3efe6', [0, 0.9, 0.22], [0.05, 0.05, 0.16], [0, 0, -20]); // bandeirinha
   }
   mailboxWorldPos(): pc.Vec3 { return this.mailbox.getPosition(); }
 
-  /** Sol de dia, lua de noite: ângulo, cor, intensidade, luz ambiente e cor do céu variam com `now`. */
+  /**
+   * Sol e lua ficam sempre ligados; só a intensidade/cor deles varia continuamente com `now`
+   * (curva senoidal suave), então a troca dia/noite nunca dá um salto — é sempre gradual.
+   */
   applyDayNight(now: number) {
     const ph = dayNightPhase(now);
-    const active = ph.isDay ? this.sun : this.moon, inactive = ph.isDay ? this.moon : this.sun;
-    inactive.enabled = false; active.enabled = true;
-    active.setEulerAngles(15 + ph.elev * 65, ph.azimuthDeg, 0);
-    if (ph.isDay) {
-      active.light!.color = lerpColor(new pc.Color(1, 0.55, 0.35), new pc.Color(1, 0.95, 0.85), ph.elev);
-      active.light!.intensity = 0.9 + ph.elev * 1.1;
-    } else {
-      active.light!.color = new pc.Color(0.55, 0.62, 0.85);
-      active.light!.intensity = 0.15 + ph.elev * 0.35;
-    }
-    const bright = ph.isDay ? 0.25 + 0.75 * ph.elev : 0.06 + 0.14 * ph.elev;
-    this.app.scene.ambientLight = lerpColor(new pc.Color(0.05, 0.06, 0.11), new pc.Color(0.42, 0.44, 0.52), Math.min(1, bright));
-    this.skyColor = ph.isDay
-      ? lerpColor(new pc.Color(0.97, 0.78, 0.6), new pc.Color(0.96, 0.91, 0.82), ph.elev)
-      : lerpColor(new pc.Color(0.05, 0.06, 0.12), new pc.Color(0.1, 0.12, 0.2), ph.elev);
-    this.sunDisc.enabled = ph.isDay; this.moonDisc.enabled = !ph.isDay;
-    const rad = (ph.azimuthDeg * Math.PI) / 180, dist = 26, height = 2 + ph.elev * 16;
-    (ph.isDay ? this.sunDisc : this.moonDisc).setPosition(Math.sin(rad) * dist, height, PLOT_Z - Math.cos(rad) * dist * 0.4 - 6);
+    this.sun.setEulerAngles(15 + ph.dayFactor * 65, ph.azimuthDeg, 0);
+    this.moon.setEulerAngles(15 + ph.nightFactor * 65, ph.azimuthDeg + 180, 0);
+    this.sun.light!.color = lerpColor(new pc.Color(1, 0.55, 0.35), new pc.Color(1, 0.95, 0.85), ph.dayFactor);
+    this.sun.light!.intensity = ph.dayFactor * (0.9 + ph.dayFactor * 1.1);
+    this.moon.light!.color = new pc.Color(0.55, 0.62, 0.85);
+    this.moon.light!.intensity = ph.nightFactor * (0.15 + ph.nightFactor * 0.35);
+    this.app.scene.ambientLight = lerpColor(new pc.Color(0.05, 0.06, 0.11), new pc.Color(0.42, 0.44, 0.52), ph.dayFactor);
+    const horizon = new pc.Color(0.97, 0.78, 0.6), noon = new pc.Color(0.96, 0.91, 0.82), night = new pc.Color(0.06, 0.07, 0.14);
+    this.skyColor = lerpColor(night, lerpColor(horizon, noon, ph.dayFactor), ph.dayFactor);
+    this.sunDisc.enabled = ph.dayFactor > 0.02; this.moonDisc.enabled = ph.nightFactor > 0.02;
+    const dist = 26;
+    if (this.sunDisc.enabled) { const rad = (ph.azimuthDeg * Math.PI) / 180; this.sunDisc.setPosition(Math.sin(rad) * dist, 2 + ph.dayFactor * 16, -Math.cos(rad) * dist * 0.4 - 6); }
+    if (this.moonDisc.enabled) { const rad = ((ph.azimuthDeg + 180) * Math.PI) / 180; this.moonDisc.setPosition(Math.sin(rad) * dist, 2 + ph.nightFactor * 16, -Math.cos(rad) * dist * 0.4 - 6); }
   }
 
-  private buildTerrain() {
-    const r = this.root, S = 18;
-    prim(r, 'box', '#f0e0c6', [0, -1.65, 0], [220, 1, 220]); // mesa/chão que recebe as sombras
+  /** Mesa/chão compartilhado que recebe as sombras sob todas as zonas — uma só vez, cobre o mundo inteiro. */
+  private buildSharedTable() {
+    prim(this.root, 'box', '#f0e0c6', [0, -1.65, 0], [320, 1, 320]);
+  }
+
+  /** Ilha de uma zona: camadas de terra + gramado (cor pelo bioma) + cerca decorativa nas bordas. */
+  private buildIsland(r: pc.Entity, groundColor: string) {
+    const S = 18;
     prim(r, 'box', '#d9a468', [0, -1.0, 0], [S, 0.3, S]);
     prim(r, 'box', '#8b5e3c', [0, -0.55, 0], [S, 0.6, S]);
-    prim(r, 'box', '#9fd06a', [0, -0.15, 0], [S, 0.3, S]);
-    prim(r, 'box', '#e8dfcf', [3.7, 0.02, PLOT_Z], [5.0, 0.04, 1.3]);
-    prim(r, 'box', '#e8dfcf', [6.2, 0.02, -1.98], [1.3, 0.04, 7.25]);
-    prim(r, 'box', '#e8dfcf', [7.9, 0.02, -1.5], [3.4, 0.04, 1.3]); // saída do caminhão
-    this.fence(-8.6, -8.6, 8.6, -8.6); this.fence(-8.6, -8.6, -8.6, 8.6); // cerca decorativa nas bordas da ilha
+    prim(r, 'box', groundColor, [0, -0.15, 0], [S, 0.3, S]);
+    this.fence(r, -8.6, -8.6, 8.6, -8.6); this.fence(r, -8.6, -8.6, -8.6, 8.6);
+    this.fence(r, -8.6, 8.6, 8.6, 8.6); this.fence(r, 8.6, -8.6, 8.6, 8.6);
   }
 
-  private fence(x1: number, z1: number, x2: number, z2: number, gap?: (x: number, z: number) => boolean) {
+  /** Nuvens cobrindo o interior de um terreno ainda não comprado; a borda continua visível por baixo. */
+  private buildCloudCover(r: pc.Entity): pc.Entity {
+    const cloudGrp = group(r, 0, 0, 0, 'cloudcover');
+    const m = new pc.StandardMaterial();
+    m.diffuse = new pc.Color(1, 1, 1); m.emissive = new pc.Color(0.9, 0.92, 0.95);
+    m.opacity = 0.93; m.blendType = pc.BLEND_NORMAL; m.useMetalness = true; m.metalness = 0; m.update();
+    const puff = (x: number, y: number, z: number, s: number) => {
+      const e = new pc.Entity('cloud');
+      e.addComponent('render', { type: 'sphere', material: m, castShadows: false, receiveShadows: false });
+      e.setLocalPosition(x, y, z); e.setLocalScale(s, s * 0.65, s);
+      cloudGrp.addChild(e);
+    };
+    for (let gz = -3; gz <= 3; gz++) for (let gx = -3; gx <= 3; gx++) {
+      const wx = PLOT_X + gx * CELL, wz = PLOT_Z + gz * CELL;
+      puff(wx + (Math.random() - 0.5) * 0.6, 1.6 + Math.random() * 1.1, wz + (Math.random() - 0.5) * 0.6, 1.0 + Math.random() * 0.45);
+    }
+    return cloudGrp;
+  }
+
+  /** Placa indicando o terreno vizinho: mostra bioma/preço (via tooltip de hover) e serve de alvo de clique p/ comprar ou centralizar. */
+  private buildMarker(r: pc.Entity): pc.Entity {
+    const m = group(r, 0, 0, 0, 'marker');
+    prim(m, 'cylinder', '#8b6a45', [0, 0.45, 0], [0.09, 0.9, 0.09]);
+    prim(m, 'box', '#f3efe6', [0, 1.0, 0], [0.9, 0.5, 0.06]);
+    return m;
+  }
+
+  private fence(r: pc.Entity, x1: number, z1: number, x2: number, z2: number) {
     const len = Math.hypot(x2 - x1, z2 - z1), n = Math.round(len / 1.1), yaw = (Math.atan2(x2 - x1, z2 - z1) * 180) / Math.PI;
     for (let i = 0; i <= n; i++) {
       const x = x1 + ((x2 - x1) * i) / n, z = z1 + ((z2 - z1) * i) / n;
-      if (!gap?.(x, z)) prim(this.root, 'box', WOOD, [x, 0.28, z], [0.13, 0.56, 0.13]);
+      prim(r, 'box', WOOD, [x, 0.28, z], [0.13, 0.56, 0.13]);
       if (i < n) {
         const mx = x1 + ((x2 - x1) * (i + 0.5)) / n, mz = z1 + ((z2 - z1) * (i + 0.5)) / n;
-        if (gap?.(mx, mz)) continue;
-        for (const y of [0.22, 0.42]) prim(this.root, 'box', WOOD2, [mx, y, mz], [0.06, 0.06, len / n], [0, yaw, 0]);
+        for (const y of [0.22, 0.42]) prim(r, 'box', WOOD2, [mx, y, mz], [0.06, 0.06, len / n], [0, yaw, 0]);
       }
     }
   }
 
-  private buildBuildings() {
-    const r = this.root;
+  private buildBuildings(r: pc.Entity) {
     const barn = group(r, 4.3, 0, -5.6, 'barn');
     barn.setLocalEulerAngles(0, 90, 0); // porta (+z local) fica voltada para o caminho
     prim(barn, 'box', RED, [0, 1, 0], [3, 2, 2.6]);
@@ -308,10 +386,12 @@ export class FarmScene {
     this.blades = group(hub, 0, 0, 0.15, 'blades');
     prim(this.blades, 'box', '#f3efe6', [0, 0, 0], [0.22, 2.7, 0.05]);
     prim(this.blades, 'box', '#f3efe6', [0, 0, 0], [2.7, 0.22, 0.05]);
+    prim(r, 'box', '#e8dfcf', [3.7, 0.02, PLOT_Z], [5.0, 0.04, 1.3]);
+    prim(r, 'box', '#e8dfcf', [6.2, 0.02, -1.98], [1.3, 0.04, 7.25]);
+    prim(r, 'box', '#e8dfcf', [7.9, 0.02, -1.5], [3.4, 0.04, 1.3]); // saída do caminhão
   }
 
-  private buildNature() {
-    const r = this.root;
+  private buildNature(r: pc.Entity) {
     const trees: [number, number, number][] = [[-7, -6.5, 1], [-5.5, -7.5, 0.8], [7.5, 7.2, 1.1], [-7.5, 5.5, 1], [1.5, -7.5, 0.9], [-4.5, 7.6, 0.8], [7.8, 0.6, 0.9]];
     trees.forEach(([x, z, s], i) => {
       const t = group(r, x, 0, z, 'tree'); t.setLocalScale(s, s, s);
@@ -334,8 +414,8 @@ export class FarmScene {
     });
   }
 
-  private buildTruck() {
-    this.truck = group(this.root, 6.2, 0, -1.5, 'truck');
+  private buildTruck(r: pc.Entity) {
+    this.truck = group(r, 6.2, 0, -1.5, 'truck');
     this.truck.setEulerAngles(0, 90, 0);
     this.truck.enabled = true;
     this.syncTruckTier(1);
@@ -388,8 +468,16 @@ export class FarmScene {
   /** Eventos lógicos -> animações. O estado do jogo já foi atualizado; aqui é só apresentação. */
   handleEvent(e: GameEvent) {
     if (e.type === 'harvest') {
-      const p = this.cellToWorld(e.ix, e.iz);
-      this.fly(new pc.Vec3(p.x, 0.8, p.z), new pc.Vec3(SILO_X, 4.3, SILO_Z), ITEM_COLOR[e.crop], e.order * 0.09, 0.9, 2.6, () => { this.pulse = 1; });
+      const zo = this.game.zones[this.activeZoneIndex];
+      const local = this.cellToWorld(e.ix, e.iz);
+      const p = new pc.Vec3(local.x + zo.dx, 0.8, local.z + zo.dz);
+      if (this.activeZoneIndex === 0) {
+        // em casa, o item realmente voa até o silo
+        this.fly(p, new pc.Vec3(SILO_X, 4.3, SILO_Z), ITEM_COLOR[e.crop], e.order * 0.09, 0.9, 2.6, () => { this.pulse = 1; });
+      } else {
+        // longe demais do silo pra voar até lá: só um "poof" no lugar (o item entra no silo de qualquer forma)
+        this.fly(p, p, ITEM_COLOR[e.crop], e.order * 0.09, 0.7, 2.2, () => { this.pulse = 1; });
+      }
     } else {
       let i = 0;
       const n = e.cargo.wheat + e.cargo.corn + e.cargo.tomato, st = staggerMs(n) / 1000;
@@ -425,8 +513,8 @@ export class FarmScene {
   }
 
   // --- Animais: curral de galinhas ---
-  private buildCoopBase() {
-    this.coopGroup = group(this.root, 0.6, 0, -4.6, 'coop');
+  private buildCoopBase(r: pc.Entity) {
+    this.coopGroup = group(r, 0.6, 0, -4.6, 'coop');
     this.coopGroup.enabled = false;
   }
   /** Constrói/reconstrói o curral quando é comprado ou melhorado de nível. */
@@ -462,34 +550,36 @@ export class FarmScene {
     }
   }
 
-  // --- Animais: pasto (vacas/ovelhas) ---
+  // --- Animais: pasto (vacas/ovelhas) — sempre na zona 0 ---
   /** Vacas e ovelhas espalhadas pelos tiles de pasto (limitado visualmente a 14; o resto só conta no número). */
   syncHerd(cows: number, sheep: number) {
-    const key = `${cows},${sheep},${this.farm.fenceVersion}`;
+    const homeFarm = this.game.zones[0].farm;
+    const key = `${cows},${sheep},${homeFarm.fenceVersion}`;
     if (key === this.herdKey) return;
     this.herdKey = key;
-    if (!this.herdGroup) this.herdGroup = group(this.root, 0, 0, 0, 'herd');
+    if (!this.herdGroup) this.herdGroup = group(this.zoneGroups[0], 0, 0, 0, 'herd');
     this.herdGroup.children.slice().forEach(c => (c as pc.Entity).destroy());
-    const spots = this.farm.tiles.filter(t => t.pasture).map(t => this.cellToWorld(t.ix, t.iz));
+    const spots = homeFarm.tiles.filter(t => t.pasture).map(t => this.cellToWorld(t.ix, t.iz));
     if (!spots.length) return;
     const total = Math.min(cows + sheep, 14);
     for (let i = 0; i < total; i++) {
       const isCow = i < Math.min(cows, total);
       const p = spots[i % spots.length];
       const e = group(this.herdGroup, p.x + (Math.random() - 0.5) * CELL * 0.5, 0, p.z + (Math.random() - 0.5) * CELL * 0.5, isCow ? 'cow' : 'sheep');
-      const body = isCow ? '#f4f0e6' : '#f4f0e6', head = isCow ? '#e0c3a4' : '#4a4038';
+      const body = '#f4f0e6', head = isCow ? '#e0c3a4' : '#4a4038';
       prim(e, 'sphere', body, [0, 0.28, 0], [isCow ? 0.34 : 0.26, isCow ? 0.28 : 0.22, isCow ? 0.5 : 0.4]);
       prim(e, 'sphere', head, [0, 0.34, isCow ? 0.32 : 0.24], [0.2, 0.18, 0.2]);
-      if (isCow) prim(e, 'sphere', '#5a4636', [0.07, 0.34, isCow ? 0.2 : 0.14], [0.18, 0.12, 0.2]);
+      if (isCow) prim(e, 'sphere', '#5a4636', [0.07, 0.34, 0.2], [0.18, 0.12, 0.2]);
     }
   }
 
   private buildHover() {
+    const home = this.zoneGroups[0];
     this.hoverEdge = new pc.Entity('hoverEdge');
     this.hoverEdge.addComponent('render', { type: 'box', material: ghostMat(0.55), castShadows: false, receiveShadows: false });
     this.hoverEdge.setLocalScale(0.08, 0.5, CELL * 0.85);
     this.hoverEdge.enabled = false;
-    this.root.addChild(this.hoverEdge);
+    home.addChild(this.hoverEdge);
     const m = new pc.StandardMaterial();
     m.diffuse = new pc.Color(0, 0, 0); m.emissive = new pc.Color(1, 1, 0.85);
     m.opacity = 0.3; m.blendType = pc.BLEND_NORMAL; m.depthWrite = false; m.update();
@@ -497,11 +587,11 @@ export class FarmScene {
     this.hover.addComponent('render', { type: 'box', material: m, castShadows: false, receiveShadows: false });
     this.hover.setLocalScale(CELL * 0.96, 0.03, CELL * 0.96);
     this.hover.enabled = false;
-    this.root.addChild(this.hover);
+    home.addChild(this.hover);
     this.pastureSelBox = new pc.Entity('pastureSel');
     this.pastureSelBox.addComponent('render', { type: 'box', material: ghostMat(0.4), castShadows: false, receiveShadows: false });
     this.pastureSelBox.enabled = false;
-    this.root.addChild(this.pastureSelBox);
+    home.addChild(this.pastureSelBox);
   }
 
   setPastureSelection(sel: { x0: number; z0: number; x1: number; z1: number } | null) {

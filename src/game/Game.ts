@@ -3,7 +3,20 @@ import { AXE_PRICE, PICKAXE_PRICE, SEED_UNLOCK_COST, SILO_TIERS, TRUCK_TIERS } f
 import { CropSystem } from './CropSystem';
 import { EconomySystem, FENCE_PRICE, Inventory } from './EconomySystem';
 import { Farm, FenceDir } from './Farm';
+import { BiomeId, BIOMES, CORNERS, ZONE_BASE_COST } from '../data/biomes';
+import { generateZoneContent } from './ZoneGen';
 import { SaveSystem } from './SaveSystem';
+
+export interface Zone { biome: BiomeId; farm: Farm; owned: boolean; dx: number; dz: number }
+function freshZones(): Zone[] {
+  const zones: Zone[] = [{ biome: 'pradaria', farm: new Farm(), owned: true, dx: 0, dz: 0 }];
+  for (const c of CORNERS) {
+    const f = new Farm();
+    generateZoneContent(f, BIOMES[c.biome], c.dx * 131 + c.dz * 977); // conteúdo já existe desde o início, só fica encoberto até comprar
+    zones.push({ biome: c.biome, farm: f, owned: false, dx: c.dx, dz: c.dz });
+  }
+  return zones;
+}
 import { generateQuest, Quest } from './QuestSystem';
 import { pendingEggs, pendingMilk, pendingWool } from './AnimalSystem';
 import { AnimalProduct, CHICKEN_PRICE, COOP_BASE_COST, COOP_TIERS, COW_PRICE, PASTURE_TILE_PRICE, PRODUCTS, SHEEP_PRICE } from '../data/animals';
@@ -20,7 +33,9 @@ const sameTool = (a: Tool | null, b: Tool) => !!a && a.kind === b.kind && (a.kin
 
 /** Ponto único do estado lógico. Extensões futuras (clima, missões, NPCs) entram como sistemas aqui. */
 export class Game {
-  readonly farm = new Farm();
+  readonly zones: Zone[] = freshZones();
+  activeZone = 0;
+  get farm(): Farm { return this.zones[this.activeZone].farm; }
   readonly crops = new CropSystem();
   readonly economy = new EconomySystem();
   readonly truck = new TruckSystem();
@@ -49,11 +64,18 @@ export class Game {
       this.economy.chickens = s.chickens ?? 0; this.economy.cows = s.cows ?? 0; this.economy.sheep = s.sheep ?? 0;
       if (s.animalInventory) this.economy.animalInventory = { ...this.economy.animalInventory, ...s.animalInventory };
       if (s.lastCollected) this.economy.lastCollected = { ...this.economy.lastCollected, ...s.lastCollected };
-      if (s.farmRadius) this.farm.radius = s.farmRadius;
-      if (s.farmFences) for (const k of s.farmFences) this.farm.fences.add(k);
-      for (const d of s.tiles) {
-        const t = this.farm.get(d.ix, d.iz);
-        if (t) { t.tilled = d.tilled; t.crop = d.crop; t.plantedAt = d.plantedAt; t.obstacle = d.obstacle ?? null; t.pasture = d.pasture ?? false; }
+      if (s.zones && s.zones.length === this.zones.length) {
+        s.zones.forEach((zs, i) => {
+          const z = this.zones[i];
+          z.owned = zs.owned;
+          for (const d of zs.tiles) {
+            const t = z.farm.get(d.ix, d.iz);
+            if (t) { t.tilled = d.tilled; t.crop = d.crop; t.plantedAt = d.plantedAt; t.obstacle = d.obstacle ?? null; t.pasture = d.pasture ?? false; }
+          }
+          z.farm.fences.clear();
+          for (const k of zs.fences) z.farm.fences.add(k);
+        });
+        this.activeZone = Math.min(s.activeZone ?? 0, this.zones.length - 1);
       }
       if (s.truck) { this.truck.departedAt = s.truck.departedAt; this.truck.cargo = { ...this.truck.cargo, ...s.truck.cargo }; this.truck.tier = s.truck.tier ?? 1; }
     }
@@ -156,13 +178,22 @@ export class Game {
     if (!this.economy.spend(FENCE_PRICE)) { this.msgFn('Moedas insuficientes'); return; }
     this.economy.fences++; this.msgFn('+1 cerca'); this.commit();
   }
-  expandFarm() {
-    const cost = this.farm.expandCost();
-    if (cost === null) { this.msgFn('Terreno já no tamanho máximo'); return; }
+  /** Troca o foco (e a câmera, via main.ts observando activeZone) para um terreno já possuído. */
+  switchZone(i: number) {
+    if (i < 0 || i >= this.zones.length || !this.zones[i].owned || i === this.activeZone) return;
+    this.activeZone = i; this.selectedTool = null; this.pastureSelecting = false; this.pastureSel = null;
+    this.emit();
+  }
+  ownedCount() { return this.zones.filter(z => z.owned).length; }
+  zoneCost(i: number): number { return ZONE_BASE_COST * this.ownedCount(); }
+  /** Compra o terreno i (um dos 4 cantos). O conteúdo já existia, gerado desde o início — só estava encoberto por nuvens. */
+  buyCornerZone(i: number) {
+    const z = this.zones[i]; if (!z || z.owned) return;
+    const cost = this.zoneCost(i);
     if (!this.economy.spend(cost)) { this.msgFn('Moedas insuficientes'); return; }
-    const { treasureBonus } = this.farm.expand();
-    if (treasureBonus) { this.economy.coins += treasureBonus; this.msgFn(`🚜 Terreno expandido! Achou um tesouro enterrado: +${treasureBonus} 🪙`); }
-    else this.msgFn('🚜 Terreno expandido! Tem árvores, pedras... e talvez algo mais.');
+    z.owned = true;
+    this.activeZone = i; this.selectedTool = null;
+    this.msgFn(`🌫️ Nuvens dissipadas: ${BIOMES[z.biome].name} liberado!`);
     this.commit();
   }
 
@@ -218,6 +249,7 @@ export class Game {
 
   // --- Animais: curral/galinhas ---
   buyCoop() {
+    if (this.activeZone !== 0) { this.msgFn('Isso só existe na fazenda principal'); return; }
     if (this.economy.hasCoop) return;
     if (!this.economy.spend(COOP_BASE_COST)) { this.msgFn('Moedas insuficientes'); return; }
     this.economy.hasCoop = true; this.economy.coopTier = 1;
@@ -231,6 +263,7 @@ export class Game {
     this.msgFn(`🐔 ${next.name} construído!`); this.commit();
   }
   buyChicken() {
+    if (this.activeZone !== 0) { this.msgFn('Isso só existe na fazenda principal'); return; }
     if (!this.economy.hasCoop) { this.msgFn('Compre o curral primeiro'); return; }
     if (this.economy.chickens >= COOP_TIERS[this.economy.coopTier - 1].capacity) { this.msgFn('Curral cheio'); return; }
     if (!this.economy.spend(CHICKEN_PRICE)) { this.msgFn('Moedas insuficientes'); return; }
@@ -239,7 +272,9 @@ export class Game {
 
   // --- Animais: pasto (comprado por bloco, seleção por arraste) ---
   pastureCapacity() { return this.farm.pastureCount(); }
-  startPastureMode() { this.pastureSelecting = true; this.pastureSel = null; this.emit(); }
+  startPastureMode() {
+    if (this.activeZone !== 0) { this.msgFn('Pasto só pode ficar na fazenda principal'); return; }
+    this.pastureSelecting = true; this.pastureSel = null; this.emit(); }
   cancelPastureMode() { this.pastureSelecting = false; this.pastureSel = null; this.emit(); }
   setPastureSelection(a: [number, number], b: [number, number]) {
     this.pastureSel = { x0: Math.min(a[0], b[0]), x1: Math.max(a[0], b[0]), z0: Math.min(a[1], b[1]), z1: Math.max(a[1], b[1]) };
@@ -278,11 +313,13 @@ export class Game {
   }
 
   buyCow() {
+    if (this.activeZone !== 0) { this.msgFn('Isso só existe na fazenda principal'); return; }
     if (this.economy.cows + this.economy.sheep >= this.pastureCapacity()) { this.msgFn('Pasto cheio — compre mais área'); return; }
     if (!this.economy.spend(COW_PRICE)) { this.msgFn('Moedas insuficientes'); return; }
     this.economy.cows++; this.msgFn('+1 🐄'); this.commit();
   }
   buySheep() {
+    if (this.activeZone !== 0) { this.msgFn('Isso só existe na fazenda principal'); return; }
     if (this.economy.cows + this.economy.sheep >= this.pastureCapacity()) { this.msgFn('Pasto cheio — compre mais área'); return; }
     if (!this.economy.spend(SHEEP_PRICE)) { this.msgFn('Moedas insuficientes'); return; }
     this.economy.sheep++; this.msgFn('+1 🐑'); this.commit();
@@ -307,16 +344,19 @@ export class Game {
 
   private commit() {
     SaveSystem.save({
-      v: 6, coins: this.economy.coins, inventory: this.economy.inventory, fences: this.economy.fences,
+      v: 8, coins: this.economy.coins, inventory: this.economy.inventory, fences: this.economy.fences,
       unlockedCrops: [...this.economy.unlockedCrops], siloTier: this.economy.siloTier,
       hasAxe: this.economy.hasAxe, hasPickaxe: this.economy.hasPickaxe,
       freeSeeds: this.economy.freeSeeds, quest: this.quest ?? undefined,
       hasCoop: this.economy.hasCoop, coopTier: this.economy.coopTier,
       chickens: this.economy.chickens, cows: this.economy.cows, sheep: this.economy.sheep,
       animalInventory: this.economy.animalInventory, lastCollected: this.economy.lastCollected,
-      farmRadius: this.farm.radius, farmFences: [...this.farm.fences],
+      activeZone: this.activeZone,
+      zones: this.zones.map(z => ({
+        biome: z.biome, owned: z.owned, fences: [...z.farm.fences],
+        tiles: z.farm.tiles.map(t => ({ ix: t.ix, iz: t.iz, tilled: t.tilled, crop: t.crop, plantedAt: t.plantedAt, obstacle: t.obstacle, pasture: t.pasture })),
+      })),
       truck: { departedAt: this.truck.departedAt, cargo: this.truck.cargo, tier: this.truck.tier },
-      tiles: this.farm.tiles.map(t => ({ ix: t.ix, iz: t.iz, tilled: t.tilled, crop: t.crop, plantedAt: t.plantedAt, obstacle: t.obstacle, pasture: t.pasture })),
     });
     this.emit();
   }
