@@ -44,6 +44,7 @@ async function boot() {
     scene.syncCoopTier(game.economy.hasCoop, game.economy.coopTier);
     scene.syncChickens(game.economy.chickens);
     scene.syncHerd(game.economy.cows, game.economy.sheep);
+    for (let i = 1; i < game.zones.length; i++) scene.syncZoneBuildings(i);
     scene.setPastureSelection(game.pastureSelecting ? game.pastureSel : null);
     scene.updateTruck(now, game.truck);
     balloons.update(now);

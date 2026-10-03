@@ -1,6 +1,7 @@
 import { CROP_LIST, CropType, CROPS } from '../data/crops';
 import { AXE_PRICE, PICKAXE_PRICE, SEED_UNLOCK_COST, SILO_TIERS, TRUCK_TIERS } from '../data/upgrades';
 import { AnimalProduct, CHICKEN_PRICE, COOP_BASE_COST, COOP_TIERS, COW_PRICE, PASTURE_TILE_PRICE, PRODUCTS, SHEEP_PRICE } from '../data/animals';
+import { BARN_WOOD_COST, DOCK_PRICE, DOCK_TIERS, ZONE_SILO_COST } from '../data/fishing';
 import { BIOMES } from '../data/biomes';
 import { DAY_MS } from '../game/DayNight';
 import { Game } from '../game/Game';
@@ -13,7 +14,7 @@ const fmtClock = (now: number) => { const t = (now % DAY_MS) / DAY_MS, h = Math.
 const $ = (id: string) => document.getElementById(id)!;
 const toolKey = (t: { kind: string; crop?: CropType } | null) => t ? `${t.kind}${t.crop ?? ''}` : '';
 
-type MarketTab = 'sementes' | 'silo' | 'caminhao' | 'cercas' | 'ferramentas' | 'terreno' | 'animais';
+type MarketTab = 'sementes' | 'silo' | 'caminhao' | 'cercas' | 'ferramentas' | 'terreno' | 'animais' | 'pesca';
 const TABS: { id: MarketTab; label: string }[] = [
   { id: 'sementes', label: '🌱 Sementes' },
   { id: 'silo', label: '🏚️ Silo' },
@@ -22,6 +23,7 @@ const TABS: { id: MarketTab; label: string }[] = [
   { id: 'ferramentas', label: '🪓 Ferramentas' },
   { id: 'terreno', label: '🗺️ Terreno' },
   { id: 'animais', label: '🐔 Animais' },
+  { id: 'pesca', label: '🎣 Pesca' },
 ];
 
 export class HUD {
@@ -52,6 +54,7 @@ export class HUD {
       if (tab) { this.marketTab = tab as MarketTab; this.marketKey = ''; if (b.dataset.mtabOpen) this.panel = 'market'; this.refresh(); return; }
       if (zone !== undefined) { game.switchZone(+zone); return; }
       if (tool === 'hoe') game.selectTool({ kind: 'hoe' });
+      else if (tool === 'dock') game.selectTool({ kind: 'dock' });
       else if (tool === 'axe') game.selectTool({ kind: 'axe' });
       else if (tool === 'pickaxe') game.selectTool({ kind: 'pickaxe' });
       else if (tool === 'fence') game.selectTool({ kind: 'fence' });
@@ -81,6 +84,11 @@ export class HUD {
       else if (b.id === 'buySheep') game.buySheep();
       else if (b.id === 'collectWool') game.collectProduct('wool');
       else if (b.id === 'sellWool') game.sellAnimalProduct('wool');
+      else if (b.id === 'buildBarn') game.buildBarn();
+      else if (b.id === 'buildZoneSilo') game.buildZoneSilo();
+      else if (b.id === 'upgradeDock') game.upgradeDock();
+      else if (b.id === 'collectFish') game.collectProduct('fish');
+      else if (b.id === 'sellFish') game.sellAnimalProduct('fish');
       else if (b.id === 'marketBtn') { this.panel = this.panel === 'market' ? 'none' : 'market'; this.marketKey = ''; this.refresh(); }
     });
     game.onChange(() => this.refresh());
@@ -90,7 +98,7 @@ export class HUD {
 
   refresh() {
     const g = this.game, now = Date.now(), away = g.truck.isAway(now);
-    $('coins').innerHTML = `🪙 ${g.economy.coins} <small>· 🌾 ${g.economy.stored()}/${g.economy.capacity()}</small>`;
+    $('coins').innerHTML = `🪙 ${g.economy.coins} <small>· 🌾 ${g.economy.stored()}/${g.economy.capacity()} · 🪵 ${g.economy.wood}</small>`;
     $('clock').textContent = `${dayNightIcon(now)} ${fmtClock(now)}`;
     const tk = toolKey(g.selectedTool);
 
@@ -102,6 +110,7 @@ export class HUD {
         + `<button data-tool="hoe">🧑‍🌾 Enxada</button>`
         + (g.economy.hasAxe ? `<button data-tool="axe">🪓 Machado</button>` : '')
         + (g.economy.hasPickaxe ? `<button data-tool="pickaxe">⛏️ Picareta</button>` : '')
+        + `<button data-tool="dock">🎣 Deck</button>`
         + `<button id="harvestAll">🧺 Colher tudo <small id="rc">0</small></button>`
         + `<button id="marketBtn">🏪 Mercado</button>`;
     }
@@ -169,11 +178,12 @@ export class HUD {
     const nextCrop = g.economy.nextLockedCrop();
     const nextSilo = SILO_TIERS[g.economy.siloTier], nextTruck = TRUCK_TIERS[g.truck.tier];
     const nextCoop = COOP_TIERS[g.economy.coopTier];
-    const pendE = g.pendingProduct('egg', now), pendM = g.pendingProduct('milk', now), pendW = g.pendingProduct('wool', now);
+    const pendE = g.pendingProduct('egg', now), pendM = g.pendingProduct('milk', now), pendW = g.pendingProduct('wool', now), pendF = g.pendingProduct('fish', now);
+    const nextDock = DOCK_TIERS[g.economy.dockTier], zone = g.zones[g.activeZone];
     const pastureCap = g.pastureCapacity(), animalsInPasture = g.economy.cows + g.economy.sheep;
     const key = [this.marketTab, g.economy.coins, g.economy.fences, g.zones.length, tk, g.economy.siloTier, g.truck.tier, nextCrop,
       g.economy.hasAxe, g.economy.hasPickaxe, g.economy.hasCoop, g.economy.coopTier, g.economy.chickens, g.economy.cows, g.economy.sheep,
-      pastureCap, JSON.stringify(g.economy.animalInventory), Math.floor(now / 1000)].join('|');
+      pastureCap, g.economy.wood, g.economy.dockTier, g.totalDocks(), zone.hasBarn, zone.hasSilo, JSON.stringify(g.economy.animalInventory), Math.floor(now / 1000)].join('|');
     if (key === this.marketKey) return;
     this.marketKey = key;
 
@@ -195,7 +205,12 @@ export class HUD {
         <div class="row">${g.economy.hasPickaxe ? `<button data-tool="pickaxe" class="all ${tk === 'pickaxe' ? 'on' : ''}">⛏️ Usar picareta</button>` : `<button id="buyPickaxe">Comprar picareta 🪙${PICKAXE_PRICE}</button>`}</div>`,
       terreno: `<div class="tstat">${g.zones.length} terrenos ao todo — a fazenda principal e 4 vizinhos nos cantos.</div>`
         + g.zones.map((z, i) => `<div class="row"><span>${i === 0 ? '🏡' : BIOMES[z.biome].emoji} ${i === 0 ? 'Fazenda (início)' : (z.owned ? BIOMES[z.biome].name : '🌫️ ???')}</span><span>${i === g.activeZone ? '<b>atual</b>' : z.owned ? 'possuído' : `🪙${g.zoneCost(i)}`}</span></div>`).join('')
-        + `<div class="tstat">Procure as placas de madeira perto da fazenda — passe o mouse pra ver o preço e clique pra comprar ou centralizar.</div>`,
+        + `<div class="tstat">Procure as placas de madeira perto da fazenda — passe o mouse pra ver o preço e clique pra comprar ou centralizar.</div>`
+        + (g.activeZone !== 0 ? `
+        <div class="mgroup">🏗️ Construção no terreno atual (${BIOMES[zone.biome].name})</div>
+        <div class="row"><span>🏚️ Galpão</span><span>${zone.hasBarn ? '✅ construído' : `<button id="buildBarn" ${g.economy.wood >= BARN_WOOD_COST ? '' : 'disabled'}>🪵${BARN_WOOD_COST} (você tem ${g.economy.wood})</button>`}</span></div>
+        <div class="row"><span>🏗️ Armazém</span><span>${zone.hasSilo ? '✅ construído' : `<button id="buildZoneSilo">🪙${ZONE_SILO_COST}</button>`}</span></div>
+        ${!zone.hasBarn || !zone.hasSilo ? '<div class="tstat">Sem os dois, não dá pra plantar aqui ainda.</div>' : ''}` : ''),
       animais: `
         <div class="mgroup">🐔 Curral</div>
         ${g.economy.hasCoop
@@ -213,6 +228,11 @@ export class HUD {
         <div class="row"><button id="buySheep" ${animalsInPasture < pastureCap ? '' : 'disabled'}>Comprar ovelha 🪙${SHEEP_PRICE}</button></div>
         <div class="row"><span>${PRODUCTS.wool.emoji} pendente: ${pendW} <small>(a cada 3 dias)</small></span><button id="collectWool" ${pendW ? '' : 'disabled'}>Coletar</button></div>
         <div class="row"><span>Estoque: ${g.economy.animalInventory.wool}</span><button id="sellWool" ${g.economy.animalInventory.wool ? '' : 'disabled'}>Vender (+${g.economy.animalInventory.wool * PRODUCTS.wool.sellPrice} 🪙)</button></div>`,
+      pesca: `<div class="tstat">${g.totalDocks()} deck(s) construídos — nível: ${DOCK_TIERS[g.economy.dockTier - 1].name} (${DOCK_TIERS[g.economy.dockTier - 1].yieldPerDay} peixes/dia cada)</div>
+        <div class="row"><button data-tool="dock" class="all ${tk === 'dock' ? 'on' : ''}">🎣 Construir deck 🪙${DOCK_PRICE} (na água, perto da margem)</button></div>
+        ${nextDock ? `<div class="row"><button id="upgradeDock" class="all">Melhorar todos p/ ${nextDock.name} (${nextDock.yieldPerDay}/dia) 🪙${nextDock.cost}</button></div>` : `<div class="tstat">Decks no nível máximo</div>`}
+        <div class="row"><span>${PRODUCTS.fish.emoji} pendente: ${pendF}</span><button id="collectFish" ${pendF ? '' : 'disabled'}>Coletar</button></div>
+        <div class="row"><span>Estoque: ${g.economy.animalInventory.fish}</span><button id="sellFish" ${g.economy.animalInventory.fish ? '' : 'disabled'}>Vender (+${g.economy.animalInventory.fish * PRODUCTS.fish.sellPrice} 🪙)</button></div>`,
     };
 
     mk.innerHTML = tabs + `<div class="mpane">${sections[this.marketTab]}</div>`;

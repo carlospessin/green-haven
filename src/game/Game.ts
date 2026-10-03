@@ -7,24 +7,26 @@ import { BiomeId, BIOMES, CORNERS, ZONE_BASE_COST } from '../data/biomes';
 import { generateZoneContent } from './ZoneGen';
 import { SaveSystem } from './SaveSystem';
 
-export interface Zone { biome: BiomeId; farm: Farm; owned: boolean; dx: number; dz: number }
+export interface Zone { biome: BiomeId; farm: Farm; owned: boolean; hasBarn: boolean; hasSilo: boolean; dx: number; dz: number }
 function freshZones(): Zone[] {
-  const zones: Zone[] = [{ biome: 'pradaria', farm: new Farm(), owned: true, dx: 0, dz: 0 }];
+  const zones: Zone[] = [{ biome: 'pradaria', farm: new Farm(), owned: true, hasBarn: true, hasSilo: true, dx: 0, dz: 0 }];
   for (const c of CORNERS) {
     const f = new Farm();
     generateZoneContent(f, BIOMES[c.biome], c.dx * 131 + c.dz * 977); // conteúdo já existe desde o início, só fica encoberto até comprar
-    zones.push({ biome: c.biome, farm: f, owned: false, dx: c.dx, dz: c.dz });
+    zones.push({ biome: c.biome, farm: f, owned: false, hasBarn: false, hasSilo: false, dx: c.dx, dz: c.dz });
   }
   return zones;
 }
 import { generateQuest, Quest } from './QuestSystem';
+import { ECON_DAY_MS } from './EconomyTime';
 import { pendingEggs, pendingMilk, pendingWool } from './AnimalSystem';
 import { AnimalProduct, CHICKEN_PRICE, COOP_BASE_COST, COOP_TIERS, COW_PRICE, PASTURE_TILE_PRICE, PRODUCTS, SHEEP_PRICE } from '../data/animals';
+import { BARN_WOOD_COST, DOCK_PRICE, DOCK_TIERS, ZONE_SILO_COST } from '../data/fishing';
 
 export interface PastureSel { x0: number; z0: number; x1: number; z1: number }
 import { LOAD_MS, TruckSystem } from './TruckSystem';
 
-export type Tool = { kind: 'seed'; crop: CropType } | { kind: 'hoe' } | { kind: 'fence' } | { kind: 'demolish' } | { kind: 'axe' } | { kind: 'pickaxe' };
+export type Tool = { kind: 'seed'; crop: CropType } | { kind: 'hoe' } | { kind: 'fence' } | { kind: 'demolish' } | { kind: 'axe' } | { kind: 'pickaxe' } | { kind: 'dock' };
 export type GameEvent =
   | { type: 'harvest'; ix: number; iz: number; crop: CropType; order: number }
   | { type: 'load'; cargo: Inventory };
@@ -56,6 +58,8 @@ export class Game {
       this.economy.fences = s.fences ?? 0;
       this.economy.siloTier = s.siloTier ?? 1;
       this.economy.hasAxe = s.hasAxe ?? false;
+      this.economy.wood = s.wood ?? 0;
+      this.economy.dockTier = s.dockTier ?? 1;
       this.economy.hasPickaxe = s.hasPickaxe ?? false;
       if (s.unlockedCrops) this.economy.unlockedCrops = new Set(s.unlockedCrops);
       if (s.freeSeeds) this.economy.freeSeeds = { ...s.freeSeeds };
@@ -67,10 +71,10 @@ export class Game {
       if (s.zones && s.zones.length === this.zones.length) {
         s.zones.forEach((zs, i) => {
           const z = this.zones[i];
-          z.owned = zs.owned;
+          z.owned = zs.owned; z.hasBarn = zs.hasBarn ?? (i === 0); z.hasSilo = zs.hasSilo ?? (i === 0);
           for (const d of zs.tiles) {
             const t = z.farm.get(d.ix, d.iz);
-            if (t) { t.tilled = d.tilled; t.crop = d.crop; t.plantedAt = d.plantedAt; t.obstacle = d.obstacle ?? null; t.pasture = d.pasture ?? false; }
+            if (t) { t.tilled = d.tilled; t.crop = d.crop; t.plantedAt = d.plantedAt; t.obstacle = d.obstacle ?? null; t.pasture = d.pasture ?? false; t.dock = d.dock ?? false; }
           }
           z.farm.fences.clear();
           for (const k of zs.fences) z.farm.fences.add(k);
@@ -110,10 +114,23 @@ export class Game {
     }
     if (st === 'planted' || st === 'growing') return;
     const tool = this.selectedTool;
+    if (tool?.kind === 'dock') {
+      if (tile.obstacle !== 'water') { this.msgFn('Só dá pra construir deck na água'); return; }
+      if (tile.dock) return;
+      if (!this.hasShoreNeighbor(tile)) { this.msgFn('Precisa ficar perto da margem'); return; }
+      if (!this.economy.spend(DOCK_PRICE)) { this.msgFn('Moedas insuficientes'); return; }
+      tile.dock = true;
+      this.msgFn('🎣 Deck construído!'); this.commit();
+      return;
+    }
     if (tool?.kind === 'axe' || tool?.kind === 'pickaxe') {
       if (!tile.obstacle) return;
       if (tile.obstacle === 'water') { this.msgFn('É água — quem sabe dá pra pescar aqui um dia'); return; }
-      if (this.crops.clear(tile, tool.kind)) { this.commit(); } else this.msgFn(tool.kind === 'axe' ? 'Use a picareta na pedra' : 'Use o machado na árvore');
+      const wasTree = tile.obstacle === 'tree';
+      if (this.crops.clear(tile, tool.kind)) {
+        if (wasTree) { const n = 3 + Math.floor(Math.random() * 3); this.economy.wood += n; this.msgFn(`+${n} 🪵`); }
+        this.commit();
+      } else this.msgFn(tool.kind === 'axe' ? 'Use a picareta na pedra' : 'Use o machado na árvore');
       return;
     }
     if (tile.obstacle) { this.msgFn(tile.obstacle === 'water' ? 'Terreno alagado — não dá pra arar aqui' : tile.obstacle === 'tree' ? 'Corte a árvore com o machado' : 'Quebre a pedra com a picareta'); return; }
@@ -123,6 +140,8 @@ export class Game {
       return;
     }
     if (tool.kind === 'hoe') { if (this.crops.till(tile)) this.commit(); return; }
+    const zone = this.zones[this.activeZone];
+    if (this.activeZone !== 0 && (!zone.hasBarn || !zone.hasSilo)) { this.msgFn('Construa o galpão e o armazém aqui primeiro (aba Terreno)'); return; }
     if (!this.economy.unlockedCrops.has(tool.crop)) { this.msgFn('Semente ainda não liberada'); return; }
     if (!tile.tilled) { this.msgFn('Are o terreno primeiro'); return; }
     const def = CROPS[tool.crop], free = this.economy.freeSeeds[tool.crop] ?? 0;
@@ -325,9 +344,43 @@ export class Game {
     this.economy.sheep++; this.msgFn('+1 🐑'); this.commit();
   }
 
+  private hasShoreNeighbor(tile: { ix: number; iz: number }): boolean {
+    for (const [dx, dz] of [[0, -1], [0, 1], [1, 0], [-1, 0]] as const) {
+      const n = this.farm.get(tile.ix + dx, tile.iz + dz);
+      if (n && n.obstacle !== 'water') return true;
+    }
+    return false;
+  }
+  totalDocks(): number { return this.zones.reduce((s, z) => s + z.farm.tiles.filter(t => t.dock).length, 0); }
+  buildBarn() {
+    const z = this.zones[this.activeZone];
+    if (this.activeZone === 0 || z.hasBarn) return;
+    if (this.economy.wood < BARN_WOOD_COST) { this.msgFn('Madeira insuficiente'); return; }
+    this.economy.wood -= BARN_WOOD_COST; z.hasBarn = true;
+    this.msgFn('🏚️ Galpão construído!'); this.commit();
+  }
+  buildZoneSilo() {
+    const z = this.zones[this.activeZone];
+    if (this.activeZone === 0 || z.hasSilo) return;
+    if (!this.economy.spend(ZONE_SILO_COST)) { this.msgFn('Moedas insuficientes'); return; }
+    z.hasSilo = true;
+    this.msgFn('🏗️ Armazém construído!'); this.commit();
+  }
+  upgradeDock() {
+    const next = DOCK_TIERS[this.economy.dockTier];
+    if (!next) { this.msgFn('Decks já no nível máximo'); return; }
+    if (!this.economy.spend(next.cost)) { this.msgFn('Moedas insuficientes'); return; }
+    this.economy.dockTier = next.level;
+    this.msgFn(`🎣 ${next.name}!`); this.commit();
+  }
+
   pendingProduct(kind: AnimalProduct, now = Date.now()): number {
     const e = this.economy, lc = e.lastCollected[kind];
-    return kind === 'egg' ? pendingEggs(e.chickens, lc, now) : kind === 'milk' ? pendingMilk(e.cows, lc, now) : pendingWool(e.sheep, lc, now);
+    if (kind === 'egg') return pendingEggs(e.chickens, lc, now);
+    if (kind === 'milk') return pendingMilk(e.cows, lc, now);
+    if (kind === 'wool') return pendingWool(e.sheep, lc, now);
+    const perDay = this.totalDocks() * DOCK_TIERS[e.dockTier - 1].yieldPerDay;
+    return Math.floor(perDay * (now - lc) / ECON_DAY_MS);
   }
   collectProduct(kind: AnimalProduct) {
     const now = Date.now(), pend = this.pendingProduct(kind, now);
@@ -344,7 +397,8 @@ export class Game {
 
   private commit() {
     SaveSystem.save({
-      v: 8, coins: this.economy.coins, inventory: this.economy.inventory, fences: this.economy.fences,
+      v: 9, coins: this.economy.coins, inventory: this.economy.inventory, fences: this.economy.fences,
+      wood: this.economy.wood, dockTier: this.economy.dockTier,
       unlockedCrops: [...this.economy.unlockedCrops], siloTier: this.economy.siloTier,
       hasAxe: this.economy.hasAxe, hasPickaxe: this.economy.hasPickaxe,
       freeSeeds: this.economy.freeSeeds, quest: this.quest ?? undefined,
@@ -353,8 +407,8 @@ export class Game {
       animalInventory: this.economy.animalInventory, lastCollected: this.economy.lastCollected,
       activeZone: this.activeZone,
       zones: this.zones.map(z => ({
-        biome: z.biome, owned: z.owned, fences: [...z.farm.fences],
-        tiles: z.farm.tiles.map(t => ({ ix: t.ix, iz: t.iz, tilled: t.tilled, crop: t.crop, plantedAt: t.plantedAt, obstacle: t.obstacle, pasture: t.pasture })),
+        biome: z.biome, owned: z.owned, hasBarn: z.hasBarn, hasSilo: z.hasSilo, fences: [...z.farm.fences],
+        tiles: z.farm.tiles.map(t => ({ ix: t.ix, iz: t.iz, tilled: t.tilled, crop: t.crop, plantedAt: t.plantedAt, obstacle: t.obstacle, pasture: t.pasture, dock: t.dock })),
       })),
       truck: { departedAt: this.truck.departedAt, cargo: this.truck.cargo, tier: this.truck.tier },
     });

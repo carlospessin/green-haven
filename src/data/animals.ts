@@ -1,4 +1,4 @@
-export type AnimalProduct = 'egg' | 'milk' | 'wool';
+export type AnimalProduct = 'egg' | 'milk' | 'wool' | 'fish';
 
 export const CHICKEN_PRICE = 40, COW_PRICE = 120, SHEEP_PRICE = 150;
 export const COOP_BASE_COST = 200, PASTURE_TILE_PRICE = 25;
@@ -15,4 +15,5 @@ export const PRODUCTS: Record<AnimalProduct, { name: string; emoji: string; sell
   egg: { name: 'Ovo', emoji: '🥚', sellPrice: 8 },
   milk: { name: 'Leite', emoji: '🥛', sellPrice: 14 },
   wool: { name: 'Lã', emoji: '🧶', sellPrice: 70 },
+  fish: { name: 'Peixe', emoji: '🐟', sellPrice: 10 },
 };

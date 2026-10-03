@@ -58,6 +58,14 @@ function createObstacleModel(kind: 'tree' | 'rock' | 'water'): pc.Entity {
   return root;
 }
 
+/** Deck de pesca: tábuas de madeira sobre a água, com um poste no canto. */
+function createDockModel(): pc.Entity {
+  const root = new pc.Entity('dock');
+  for (let i = 0; i < 4; i++) prim(root, 'box', '#9a6a45', [-0.33 + i * 0.22, 0.07, 0], [0.18, 0.04, 0.78]);
+  prim(root, 'cylinder', '#7a5236', [-0.4, 0.2, -0.33], [0.05, 0.4, 0.05]);
+  return root;
+}
+
 interface ZoneView { key: string; entity: pc.Entity }
 
 export class FarmScene {
@@ -68,6 +76,9 @@ export class FarmScene {
   private zoneFenceKey: string[] = [];
   private zoneCloud: (pc.Entity | null)[] = [];
   private zoneMarker: (pc.Entity | null)[] = [];
+  private zoneBarn: (pc.Entity | null)[] = [];
+  private zoneSilo: (pc.Entity | null)[] = [];
+  private zoneBuiltShown: string[] = [];
   private activeZoneIndex = 0;
   private hover!: pc.Entity;
   private hoverEdge!: pc.Entity;
@@ -120,6 +131,31 @@ export class FarmScene {
     } else {
       this.zoneCloud[i] = z.owned ? null : this.buildCloudCover(grp);
       this.zoneMarker[i] = this.buildMarker(grp);
+      this.zoneBuiltShown[i] = '';
+    }
+  }
+
+  /** Galpão e armazém simples (menores que os da fazenda) — aparecem quando construídos num terreno vizinho. */
+  syncZoneBuildings(i: number) {
+    if (i === 0) return;
+    const z = this.game.zones[i], key = `${z.hasBarn}|${z.hasSilo}`;
+    if (key === this.zoneBuiltShown[i]) return;
+    this.zoneBuiltShown[i] = key;
+    const grp = this.zoneGroups[i];
+    this.zoneBarn[i]?.destroy(); this.zoneBarn[i] = null;
+    this.zoneSilo[i]?.destroy(); this.zoneSilo[i] = null;
+    if (z.hasBarn) {
+      const b = group(grp, -3.2, 0, -3.2, 'zonebarn');
+      prim(b, 'box', '#8c5a44', [0, 0.7, 0], [1.8, 1.4, 1.6]);
+      prim(b, 'box', SLATE, [0, 1.55, 0], [2.0, 0.14, 1.8], [0, 0, 0]);
+      prim(b, 'box', '#f3efe6', [0, 0.5, 0.81], [0.6, 0.8, 0.05]);
+      this.zoneBarn[i] = b;
+    }
+    if (z.hasSilo) {
+      const s = group(grp, -1.6, 0, -3.6, 'zonesilo');
+      prim(s, 'cylinder', '#ebe8e0', [0, 1.1, 0], [0.75, 2.2, 0.75]);
+      prim(s, 'sphere', '#c4c7cc', [0, 2.2, 0], [0.78, 0.55, 0.78]);
+      this.zoneSilo[i] = s;
     }
   }
 
@@ -220,14 +256,14 @@ export class FarmScene {
         continue;
       }
       const st = t.stage(now);
-      const key = `${t.obstacle ?? ''}|${t.pasture ? 1 : 0}|${t.tilled ? 1 : 0}|${t.crop ?? ''}|${st ?? ''}`;
+      const key = `${t.obstacle ?? ''}|${t.dock ? 1 : 0}|${t.pasture ? 1 : 0}|${t.tilled ? 1 : 0}|${t.crop ?? ''}|${st ?? ''}`;
       const v = views.get(t);
       if (v && v.key === key) continue;
       v?.entity.destroy();
       const e = new pc.Entity('tile');
       e.setPosition(this.cellToWorld(t.ix, t.iz));
       if (t.pasture) prim(e, 'box', '#8fcf6a', [0, 0.025, 0], [CELL * 0.96, 0.05, CELL * 0.96]); // pasto: gramado claro cercado
-      else if (t.obstacle) e.addChild(createObstacleModel(t.obstacle)); // árvore/pedra/água
+      else if (t.obstacle) { e.addChild(createObstacleModel(t.obstacle)); if (t.obstacle === 'water' && t.dock) e.addChild(createDockModel()); }
       else {
         if (t.tilled || t.crop) prim(e, 'box', '#5e412b', [0, 0.075, 0], [CELL * 0.92, 0.05, CELL * 0.92]);
         if (t.crop && st) e.addChild(createCropModel(t.crop, st));

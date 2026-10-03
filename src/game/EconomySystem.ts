@@ -20,8 +20,10 @@ export class EconomySystem {
   chickens = 0;
   cows = 0;
   sheep = 0;
-  animalInventory: Record<AnimalProduct, number> = { egg: 0, milk: 0, wool: 0 };
-  lastCollected: Record<AnimalProduct, number> = { egg: Date.now(), milk: Date.now(), wool: Date.now() };
+  wood = 0;
+  dockTier = 1;
+  animalInventory: Record<AnimalProduct, number> = { egg: 0, milk: 0, wool: 0, fish: 0 };
+  lastCollected: Record<AnimalProduct, number> = { egg: Date.now(), milk: Date.now(), wool: Date.now(), fish: Date.now() };
 
   capacity() { return SILO_TIERS[this.siloTier - 1].capacity; }
   stored(): number { return CROP_LIST.reduce((s, c) => s + this.inventory[c.id], 0); }

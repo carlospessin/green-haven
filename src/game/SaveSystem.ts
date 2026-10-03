@@ -5,15 +5,16 @@ import { BiomeId } from '../data/biomes';
 import { Quest } from './QuestSystem';
 
 export interface ZoneSave {
-  biome: BiomeId; owned: boolean; fences: string[];
-  tiles: { ix: number; iz: number; tilled: boolean; crop: CropType | null; plantedAt: number; obstacle: 'tree' | 'rock' | 'water' | null; pasture: boolean }[];
+  biome: BiomeId; owned: boolean; hasBarn: boolean; hasSilo: boolean; fences: string[];
+  tiles: { ix: number; iz: number; tilled: boolean; crop: CropType | null; plantedAt: number; obstacle: 'tree' | 'rock' | 'water' | null; pasture: boolean; dock: boolean }[];
 }
 
 export interface SaveData {
-  v: 8; coins: number; inventory: Inventory; fences: number;
+  v: 9; coins: number; inventory: Inventory; fences: number;
   unlockedCrops: CropType[]; siloTier: number; hasAxe: boolean; hasPickaxe: boolean;
   freeSeeds: Partial<Record<CropType, number>>; quest?: Quest;
   hasCoop: boolean; coopTier: number; chickens: number; cows: number; sheep: number;
+  wood: number; dockTier: number;
   animalInventory: Record<AnimalProduct, number>; lastCollected: Record<AnimalProduct, number>;
   activeZone: number; zones: ZoneSave[];
   truck?: { departedAt: number; cargo: Inventory; tier: number };

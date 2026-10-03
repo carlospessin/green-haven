@@ -3,14 +3,15 @@ export type BiomeId = 'pradaria' | 'floresta' | 'pantano' | 'deserto';
 export interface BiomeConfig {
   id: BiomeId; name: string; emoji: string;
   ground: string;                         // cor do gramado/terreno base
-  treeChance: number; rockChance: number; waterChance: number; treasureChance: number; // pesos de geração
+  treeChance: number; rockChance: number; treasureChance: number; // pesos de geração (fora do lago)
+  lakeChance: number;                      // chance desse bioma ter UM lago grande (10-15 blocos, irregular)
 }
 
 export const BIOMES: Record<BiomeId, BiomeConfig> = {
-  pradaria: { id: 'pradaria', name: 'Pradaria', emoji: '🌾', ground: '#9fd06a', treeChance: 0, rockChance: 0, waterChance: 0, treasureChance: 0 },
-  floresta: { id: 'floresta', name: 'Floresta', emoji: '🌲', ground: '#5c9a52', treeChance: 0.42, rockChance: 0.1, waterChance: 0.06, treasureChance: 0.05 },
-  pantano:  { id: 'pantano',  name: 'Pântano',  emoji: '🐸', ground: '#7a9a5e', treeChance: 0.18, rockChance: 0.06, waterChance: 0.28, treasureChance: 0.05 },
-  deserto:  { id: 'deserto',  name: 'Deserto',  emoji: '🏜️', ground: '#d8c389', treeChance: 0.04, rockChance: 0.3, waterChance: 0.015, treasureChance: 0.07 },
+  pradaria: { id: 'pradaria', name: 'Pradaria', emoji: '🌾', ground: '#9fd06a', treeChance: 0, rockChance: 0, treasureChance: 0, lakeChance: 0 },
+  floresta: { id: 'floresta', name: 'Floresta', emoji: '🌲', ground: '#5c9a52', treeChance: 0.42, rockChance: 0.1, treasureChance: 0.05, lakeChance: 0.3 },
+  pantano:  { id: 'pantano',  name: 'Pântano',  emoji: '🐸', ground: '#7a9a5e', treeChance: 0.18, rockChance: 0.06, treasureChance: 0.05, lakeChance: 0.8 },
+  deserto:  { id: 'deserto',  name: 'Deserto',  emoji: '🏜️', ground: '#d8c389', treeChance: 0.04, rockChance: 0.3, treasureChance: 0.07, lakeChance: 0.08 },
 };
 
 export type CornerId = 'ne' | 'nw' | 'se' | 'sw';

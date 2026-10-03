@@ -11,6 +11,7 @@ export class FarmTile {
   plantedAt = 0;
   obstacle: Obstacle = null;
   pasture = false;
+  dock = false;
   constructor(readonly ix: number, readonly iz: number) {}
 
   stage(now: number): CropStage | null {
